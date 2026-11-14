@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Volume2, ChevronLeft, ChevronRight, Loader2, RefreshCw, Calendar } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Volume2, ChevronLeft, ChevronRight, Loader2, RefreshCw, Calendar, CheckCircle2 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
 
@@ -15,7 +15,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// High-bar starter deck so the app opens immediately on first launch
+// In-memory placeholder only (never written to Firestore)
 const STARTER_DECK = [
   {
     type: 'word',
@@ -23,7 +23,8 @@ const STARTER_DECK = [
     pronunciation: 'TREN-chunt',
     meaning: 'Vigorous, incisive, and sharply perceptive in analysis or expression.',
     professionalExample: 'Rather than softening the bad news, the managing partner offered a trenchant critique of why our Q3 pricing model failed.',
-    personalExample: 'Her trenchant observations about local politics always cut straight through the noise at dinner.'
+    personalExample: 'Her trenchant observations about local politics always cut straight through the noise at dinner.',
+    isStarter: true
   },
   {
     type: 'word',
@@ -31,7 +32,8 @@ const STARTER_DECK = [
     pronunciation: 'pri-VAIR-uh-kayt',
     meaning: 'To speak or act in an evasive, equivocating way to avoid committing to the direct truth.',
     professionalExample: 'When the audit committee pressed for a firm timeline on the cloud migration, the vendor refused to prevaricate and admitted a six-week delay.',
-    personalExample: 'Stop prevaricating about whether you booked the flights—just tell me if we are going to Banff or not.'
+    personalExample: 'Stop prevaricating about whether you booked the flights—just tell me if we are going to Banff or not.',
+    isStarter: true
   },
   {
     type: 'word',
@@ -39,7 +41,8 @@ const STARTER_DECK = [
     pronunciation: 'BEL-weth-er',
     meaning: 'A leading indicator or predictor of broader economic, political, or industry trends.',
     professionalExample: 'Enterprise software renewals in the financial sector often serve as a bellwether for broader corporate capital spending.',
-    personalExample: 'How packed the patio is on a Thursday night in Uptown is a pretty reliable bellwether for how busy the weekend will be.'
+    personalExample: 'How packed the patio is on a Thursday night in Uptown is a pretty reliable bellwether for how busy the weekend will be.',
+    isStarter: true
   },
   {
     type: 'word',
@@ -47,7 +50,8 @@ const STARTER_DECK = [
     pronunciation: 'in-SOO-see-uns',
     meaning: 'Casual lack of concern; effortless, unbothered composure under pressure.',
     professionalExample: 'Even when the live demo stalled in front of three hundred clients, she fielded questions with remarkable insouciance.',
-    personalExample: 'He strolled into the gate two minutes before boarding closed with complete insouciance.'
+    personalExample: 'He strolled into the gate two minutes before boarding closed with complete insouciance.',
+    isStarter: true
   },
   {
     type: 'word',
@@ -55,7 +59,8 @@ const STARTER_DECK = [
     pronunciation: 'mag-NAN-uh-mus',
     meaning: 'Generous, noble, and forgiving, particularly toward a rival or someone in a weaker position.',
     professionalExample: 'In a magnanimous gesture after winning the account, our lead director praised the incumbent team’s groundwork during the transition.',
-    personalExample: 'She was magnanimous in victory after beating all of us at trivia night.'
+    personalExample: 'She was magnanimous in victory after beating all of us at trivia night.',
+    isStarter: true
   },
   {
     type: 'slang',
@@ -63,7 +68,8 @@ const STARTER_DECK = [
     pronunciation: 'boil thuh OH-shun',
     meaning: 'To waste time undertaking an impossibly broad, over-engineered analysis instead of focusing on what moves the needle.',
     professionalExample: 'We have forty-eight hours before the steering committee—let’s isolate the top three margin leaks instead of trying to boil the ocean.',
-    personalExample: 'You don’t need to boil the ocean comparing every steakhouse in Dallas; just book a table in Knox-Henderson.'
+    personalExample: 'You don’t need to boil the ocean comparing every steakhouse in Dallas; just book a table in Knox-Henderson.',
+    isStarter: true
   },
   {
     type: 'slang',
@@ -71,7 +77,8 @@ const STARTER_DECK = [
     pronunciation: 'FIK-sin tuh',
     meaning: 'Getting ready or about to do something imminently (classic Texas and Southern US conversational staple).',
     professionalExample: 'We’re fixin’ to wrap up the Dallas workshop early so everyone can catch the evening flight out of DFW.',
-    personalExample: 'I’m fixin’ to head over to Deep Ellum for live music—let me know if you want a ride.'
+    personalExample: 'I’m fixin’ to head over to Deep Ellum for live music—let me know if you want a ride.',
+    isStarter: true
   },
   {
     type: 'slang',
@@ -79,7 +86,8 @@ const STARTER_DECK = [
     pronunciation: 'DUB-ul DUB-ul',
     meaning: 'A coffee ordered with two creams and two sugars, an everyday cultural touchstone across Canada.',
     professionalExample: 'Our Toronto engagement manager never starts an 8 AM client readout without a Tim Hortons double-double on his desk.',
-    personalExample: 'It’s minus twelve in Calgary this morning—grab me a double-double before we walk over to the rink.'
+    personalExample: 'It’s minus twelve in Calgary this morning—grab me a double-double before we walk over to the rink.',
+    isStarter: true
   }
 ];
 
@@ -88,6 +96,15 @@ const withTimeout = (promise, ms, timeoutMsg) =>
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMsg)), ms))
   ]);
+
+// Local calendar date key (YYYY-MM-DD in user's local timezone)
+const getLocalDateKey = (dateInput = new Date()) => {
+  const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 async function callGeminiFull(apiKey, prompt, timeoutMs = 30000) {
   const controller = new AbortController();
@@ -135,6 +152,7 @@ export default function App() {
   const [isBgSyncing, setIsBgSyncing] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [error, setError] = useState(null);
+  const generationLockRef = useRef(false);
 
   const [touchStart, setTouchStart] = useState(null);
   const [touchEnd, setTouchEnd] = useState(null);
@@ -171,18 +189,26 @@ export default function App() {
       return;
     }
     try {
-      const q = query(collection(db, 'vocabHistory'), orderBy('timestamp', 'desc'), limit(240));
+      const q = query(collection(db, 'vocabHistory'), orderBy('timestamp', 'desc'), limit(260));
       const querySnapshot = await withTimeout(getDocs(q), 5000, 'Firestore timeout');
-      const history = [];
-      querySnapshot.forEach((doc) => history.push(doc.data()));
 
-      if (history.length > 0) {
-        setDailyData(history);
+      // Deduplicate by (localDate + term) so any previously duplicated entries collapse cleanly
+      const seen = new Set();
+      const cleanedHistory = [];
+      querySnapshot.forEach((doc) => {
+        const data = doc.data();
+        const dateKey = data.timestamp ? getLocalDateKey(data.timestamp) : 'starter';
+        const dedupeKey = `${dateKey}_${(data.term || '').toLowerCase().trim()}`;
+        if (!seen.has(dedupeKey)) {
+          seen.add(dedupeKey);
+          cleanedHistory.push(data);
+        }
+      });
+
+      if (cleanedHistory.length > 0) {
+        setDailyData(cleanedHistory.slice(0, 240));
       } else {
-        const now = new Date().toISOString();
-        const seeded = STARTER_DECK.map(item => ({ ...item, timestamp: now }));
-        setDailyData(seeded);
-        saveItemsInBackground(seeded);
+        setDailyData(STARTER_DECK);
       }
     } catch (err) {
       console.error('History load fallback:', err);
@@ -190,7 +216,16 @@ export default function App() {
     }
   };
 
+  const todayKey = getLocalDateKey();
+  const hasTodaysBriefing = dailyData.some(
+    item => !item.isStarter && item.timestamp && getLocalDateKey(item.timestamp) === todayKey
+  );
+
   const generateNewBriefing = async () => {
+    if (generationLockRef.current || isLoading || isBgSyncing || hasTodaysBriefing) {
+      return;
+    }
+    generationLockRef.current = true;
     setIsLoading(true);
     setError(null);
 
@@ -198,7 +233,8 @@ export default function App() {
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
       if (!apiKey) throw new Error('Gemini API Key is missing in Vercel.');
 
-      const existingTerms = dailyData.slice(0, 120).map(item => item.term).join(', ');
+      const existingRealItems = dailyData.filter(item => !item.isStarter);
+      const existingTerms = existingRealItems.slice(0, 120).map(item => item.term).join(', ');
       const bannedCliches = 'ubiquitous, perspicacious, sycophant, mellifluous, inexorable, paradigm, synergy, plethora, quintessential, dichotomy';
       const exclusionRule = `Never use basic GRE clichés (${bannedCliches}) or any previously generated terms: ${existingTerms}.`;
       const batchTimestamp = new Date().toISOString();
@@ -210,7 +246,7 @@ Quality & Tone Requirements:
 - Meaning: Nuanced, clear definition including subtle connotation or register.
 - Examples: Realistic, natural, multi-clause dialogue showing how an articulate leader or local friend actually uses the term in conversation (not stiff textbook sentences).`;
 
-      // STAGE 1: Fetch 1 high-caliber executive word on full gemini-3.8-flash (~2-3s)
+      // STAGE 1: Fetch 1 high-caliber executive word (~2-3s)
       const firstCardPrompt = `Generate a JSON array with exactly 1 medium-to-difficult executive English word.
 ${qualityStandards}
 ${exclusionRule}
@@ -218,16 +254,20 @@ Return ONLY a valid JSON array:
 [{"type":"word","term":"string","pronunciation":"string","meaning":"string","personalExample":"string","professionalExample":"string"}]`;
 
       const firstBatch = await callGeminiFull(apiKey, firstCardPrompt, 20000);
-      const firstStamped = firstBatch.slice(0, 1).map(item => ({ ...item, timestamp: batchTimestamp }));
+      const firstWord = firstBatch[0];
+      if (!firstWord?.term) throw new Error('Invalid response from Gemini.');
 
-      setDailyData(prev => [...firstStamped, ...prev].slice(0, 240));
+      const firstStamped = [{ ...firstWord, timestamp: batchTimestamp }];
+
+      // Replace placeholder starter deck cleanly, or prepend to existing real history
+      setDailyData([...firstStamped, ...existingRealItems].slice(0, 240));
       setCurrentIndex(0);
       setIsLoading(false);
       saveItemsInBackground(firstStamped);
 
-      // STAGE 2: Run 2 parallel specialist requests on full gemini-3.8-flash (~5-7s)
+      // STAGE 2: Parallel specialist calls for remaining 4 words + 3 slangs (~5-7s)
       setIsBgSyncing(true);
-      const updatedExclusions = `${firstStamped[0]?.term || ''}, ${existingTerms}`;
+      const updatedExclusions = `${firstWord.term}, ${existingTerms}`;
 
       const wordsPrompt = `Generate a JSON array with exactly 4 distinct medium-to-difficult executive English words.
 ${qualityStandards}
@@ -249,15 +289,21 @@ Return ONLY a valid JSON array:
         callGeminiFull(apiKey, slangPrompt, 30000)
       ]);
 
-      const restStamped = [...wordsRes.slice(0, 4), ...slangRes.slice(0, 3)].map(item => ({
+      // Deduplicate against firstWord and cap at strictly 4 words + 3 slangs = 8 total cards for today
+      const seenToday = new Set([firstWord.term.toLowerCase().trim()]);
+      const uniqueWords = wordsRes
+        .filter(w => w?.term && !seenToday.has(w.term.toLowerCase().trim()) && seenToday.add(w.term.toLowerCase().trim()))
+        .slice(0, 4);
+      const uniqueSlangs = slangRes
+        .filter(s => s?.term && !seenToday.has(s.term.toLowerCase().trim()) && seenToday.add(s.term.toLowerCase().trim()))
+        .slice(0, 3);
+
+      const restStamped = [...uniqueWords, ...uniqueSlangs].map(item => ({
         ...item,
         timestamp: batchTimestamp
       }));
 
-      setDailyData(prev => {
-        const [head, ...tail] = prev;
-        return [head, ...restStamped, ...tail].slice(0, 240);
-      });
+      setDailyData([...firstStamped, ...restStamped, ...existingRealItems].slice(0, 240));
       saveItemsInBackground(restStamped);
     } catch (err) {
       console.error(err);
@@ -265,6 +311,7 @@ Return ONLY a valid JSON array:
       setIsLoading(false);
     } finally {
       setIsBgSyncing(false);
+      generationLockRef.current = false;
     }
   };
 
@@ -293,14 +340,13 @@ Return ONLY a valid JSON array:
   };
 
   const formatDate = (isoString) => {
-    if (!isoString) return 'Starter Deck';
+    if (!isoString) return 'Sample Deck';
     return new Date(isoString).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
   const currentItem = dailyData[currentIndex] || STARTER_DECK[0];
   const currentDateStr = formatDate(currentItem?.timestamp);
 
-  // Build ordered list of unique saved days + item counts
   const uniqueDates = [...new Set(dailyData.map(item => formatDate(item.timestamp)))];
   const currentDayIdx = uniqueDates.indexOf(currentDateStr);
   const currentDayItems = dailyData.filter(item => formatDate(item.timestamp) === currentDateStr);
@@ -325,12 +371,34 @@ Return ONLY a valid JSON array:
           </div>
           <button
             onClick={generateNewBriefing}
-            disabled={isLoading || isBgSyncing}
-            title="Generate fresh daily briefing"
-            className="flex items-center gap-1.5 px-3 py-2 bg-gray-800 rounded-xl text-amber-500 hover:bg-gray-700 transition disabled:opacity-50 text-xs font-semibold border border-gray-700"
+            disabled={isLoading || isBgSyncing || hasTodaysBriefing}
+            title={
+              hasTodaysBriefing
+                ? "Today's briefing is complete. Come back tomorrow for a fresh set."
+                : 'Generate today’s 8-card briefing'
+            }
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition ${
+              hasTodaysBriefing
+                ? 'bg-emerald-950/50 text-emerald-400 border-emerald-800/70 cursor-not-allowed'
+                : 'bg-gray-800 text-amber-500 border-gray-700 hover:bg-gray-700 disabled:opacity-50'
+            }`}
           >
-            {isLoading || isBgSyncing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-            <span>New Briefing</span>
+            {isLoading || isBgSyncing ? (
+              <>
+                <Loader2 size={16} className="animate-spin" />
+                <span>Curating...</span>
+              </>
+            ) : hasTodaysBriefing ? (
+              <>
+                <CheckCircle2 size={16} />
+                <span>Done for Today</span>
+              </>
+            ) : (
+              <>
+                <RefreshCw size={16} />
+                <span>New Briefing</span>
+              </>
+            )}
           </button>
         </header>
 
