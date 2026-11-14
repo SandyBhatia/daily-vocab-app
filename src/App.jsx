@@ -21,37 +21,6 @@ const withTimeout = (promise, ms, timeoutMsg) =>
     new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMsg)), ms))
   ]);
 
-const callGeminiAPI = async (apiKey, prompt, useMinimalThinking = true) => {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 45000);
-
-  const generationConfig = {
-    responseMimeType: "application/json",
-    ...(useMinimalThinking ? { thinkingConfig: { thinkingLevel: "MINIMAL" } } : {})
-  };
-
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey.trim()}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig
-      })
-    });
-    clearTimeout(timeoutId);
-    return response;
-  } catch (err) {
-    clearTimeout(timeoutId);
-    if (err.name === 'AbortError') {
-      throw new Error("Gemini API did not respond within 45s. Check the Network tab in DevTools.");
-    }
-    throw err;
-  }
-};
-
 export default function App() {
   const [dailyData, setDailyData] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -104,7 +73,10 @@ export default function App() {
   const generateNewBriefing = async () => {
     setIsLoading(true);
     setError(null);
-    setLoadingStatus('Curating vocabulary with Gemini...');
+    setLoadingStatus('Gemini is writing 8 flashcards (this usually takes 20-40s)...');
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
 
     try {
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
@@ -121,7 +93,7 @@ Generate a JSON array of exactly 8 items:
 - 3 North American slangs (mix of everyday US corporate/social slang, Texas regionalisms, and Canadian slang)
 Keep each meaning and example crisp (1 sentence each). ${exclusionRule}
 
-Return ONLY a valid JSON array with this exact schema:
+Return ONLY a raw, valid JSON array with this exact schema (no markdown, no code blocks):
 [
   {
     "type": "word",
@@ -133,12 +105,17 @@ Return ONLY a valid JSON array with this exact schema:
   }
 ]`;
 
-      let response = await callGeminiAPI(apiKey, prompt, true);
-
-      // Fallback without thinkingConfig if the endpoint rejects thinkingLevel
-      if (response.status === 400) {
-        response = await callGeminiAPI(apiKey, prompt, false);
-      }
+      // Ultra-clean payload to prevent 400 Bad Request
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey.trim()}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }]
+        })
+      });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
@@ -147,7 +124,10 @@ Return ONLY a valid JSON array with this exact schema:
 
       const data = await response.json();
       const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const cleanedText = rawText.trim().replace(/```json/g, '').replace(/```/g, '');
+      
+      // Aggressively extract JSON just in case Gemini adds conversational filler
+      const match = rawText.match(/\[\s*\{.*\}\s*\]/s);
+      const cleanedText = match ? match[0] : rawText.trim().replace(/```json/gi, '').replace(/```/g, '');
       const parsedData = JSON.parse(cleanedText);
 
       const timestamp = new Date().toISOString();
@@ -156,7 +136,7 @@ Return ONLY a valid JSON array with this exact schema:
       setLoadingStatus('Saving briefing to cloud archive...');
       try {
         const batchPromises = itemsToSave.map(item => addDoc(collection(db, "vocabHistory"), item));
-        await withTimeout(Promise.all(batchPromises), 8000, "Cards generated, but Firebase save timed out.");
+        await withTimeout(Promise.all(batchPromises), 8000, "Cards generated locally, but Firebase save timed out.");
       } catch (dbErr) {
         console.error("Firestore save error:", dbErr);
         setError(dbErr.message);
@@ -165,8 +145,13 @@ Return ONLY a valid JSON array with this exact schema:
       setDailyData(prev => [...itemsToSave, ...prev].slice(0, 240));
       setCurrentIndex(0);
     } catch (err) {
+      clearTimeout(timeoutId);
       console.error(err);
-      setError(err.message || "Failed to generate new vocabulary.");
+      if (err.name === 'AbortError') {
+        setError("Gemini took longer than 60 seconds. Please click generate again.");
+      } else {
+        setError(err.message || "Failed to generate new vocabulary.");
+      }
     } finally {
       setIsLoading(false);
     }
