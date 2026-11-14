@@ -36,7 +36,6 @@ export default function App() {
 
   const loadHistory = async () => {
     try {
-      // Pulls the last 240 items (30 days of history at 8 items per day)
       const q = query(collection(db, "vocabHistory"), orderBy("timestamp", "desc"), limit(240));
       const querySnapshot = await getDocs(q);
       const history = [];
@@ -47,6 +46,7 @@ export default function App() {
       }
     } catch (err) {
       console.error("Error loading history:", err);
+      setError(err.message || "Failed to connect to database.");
     }
   };
 
@@ -54,7 +54,8 @@ export default function App() {
     setIsLoading(true);
     setError(null);
     try {
-      const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
+      // Corrected to the stable 1.5 flash model
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
       
       const existingTerms = dailyData.map(item => item.term).join(', ');
       const exclusionRule = existingTerms 
@@ -88,18 +89,16 @@ export default function App() {
       const batchPromises = itemsToSave.map(item => addDoc(collection(db, "vocabHistory"), item));
       await Promise.all(batchPromises);
 
-      // Prepend new items and cap local deck at 30 days (240 items)
       setDailyData(prev => [...itemsToSave, ...prev].slice(0, 240));
       setCurrentIndex(0);
     } catch (err) {
       console.error(err);
-      setError("Failed to generate new vocabulary. Please try again.");
+      setError(err.message || "Failed to generate new vocabulary. Please check API keys.");
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Swipe Handlers
   const onTouchStart = (e) => {
     setTouchEnd(null);
     setTouchStart(e.targetTouches[0].clientX);
@@ -112,13 +111,11 @@ export default function App() {
   const onTouchEnd = () => {
     if (!touchStart || !touchEnd) return;
     const distance = touchStart - touchEnd;
-    const isLeftSwipe = distance > minSwipeDistance;
-    const isRightSwipe = distance < -minSwipeDistance;
     
-    if (isLeftSwipe && currentIndex < dailyData.length - 1) {
+    if (distance > minSwipeDistance && currentIndex < dailyData.length - 1) {
       setCurrentIndex(c => c + 1);
     }
-    if (isRightSwipe && currentIndex > 0) {
+    if (distance < -minSwipeDistance && currentIndex > 0) {
       setCurrentIndex(c => c - 1);
     }
   };
@@ -149,7 +146,15 @@ export default function App() {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-8 bg-gray-950 text-center">
         <h1 className="text-3xl font-bold text-amber-500 mb-4">Daily Briefing</h1>
-        <p className="text-gray-400 mb-8">No vocabulary history found. Generate your first briefing!</p>
+        <p className="text-gray-400 mb-6">No vocabulary history found. Generate your first briefing!</p>
+        
+        {/* ADDED: Error message will now show here if something breaks! */}
+        {error && (
+          <div className="mb-6 p-4 bg-red-900/20 border border-red-900 rounded-lg max-w-sm w-full">
+            <p className="text-red-400 text-sm font-mono break-words">{error}</p>
+          </div>
+        )}
+
         <button onClick={generateNewBriefing} className="bg-amber-500 text-gray-950 px-6 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-amber-400 transition">
           <RefreshCw size={20} /> Generate First Briefing
         </button>
@@ -169,25 +174,13 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2">
           {uniqueDates.length > 1 && (
-            <select
-              value={formatDate(currentItem?.timestamp)}
-              onChange={handleDateJump}
-              aria-label="Jump to date"
-              className="bg-gray-800 text-gray-200 text-xs rounded-lg px-2.5 py-2 border border-gray-700 focus:outline-none focus:border-amber-500"
-            >
+            <select value={formatDate(currentItem?.timestamp)} onChange={handleDateJump} className="bg-gray-800 text-gray-200 text-xs rounded-lg px-2.5 py-2 border border-gray-700 focus:outline-none focus:border-amber-500">
               {uniqueDates.map(dateStr => (
-                <option key={dateStr} value={dateStr}>
-                  {dateStr}
-                </option>
+                <option key={dateStr} value={dateStr}>{dateStr}</option>
               ))}
             </select>
           )}
-          <button 
-            onClick={generateNewBriefing} 
-            disabled={isLoading}
-            className="p-2 bg-gray-800 rounded-full text-amber-500 hover:bg-gray-700 transition disabled:opacity-50"
-            aria-label="Generate new words"
-          >
+          <button onClick={generateNewBriefing} disabled={isLoading} className="p-2 bg-gray-800 rounded-full text-amber-500 hover:bg-gray-700 transition disabled:opacity-50">
             {isLoading ? <Loader2 size={20} className="animate-spin" /> : <RefreshCw size={20} />}
           </button>
         </div>
@@ -208,12 +201,7 @@ export default function App() {
             ))}
           </div>
 
-          <div 
-            onTouchStart={onTouchStart}
-            onTouchMove={onTouchMove}
-            onTouchEnd={onTouchEnd}
-            className="flex-1 flex flex-col bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-2xl relative min-h-[450px]"
-          >
+          <div onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} className="flex-1 flex flex-col bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-2xl relative min-h-[450px]">
             <div className="flex justify-between items-start mb-6">
               <div className="flex items-center gap-3">
                 <span className={`text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider ${currentItem?.type === 'word' ? 'bg-amber-900/40 text-amber-500 border border-amber-800' : 'bg-blue-900/40 text-blue-400 border border-blue-800'}`}>
@@ -258,21 +246,11 @@ export default function App() {
           </div>
 
           <div className="flex justify-between items-center mt-8 px-2">
-            <button
-              onClick={() => setCurrentIndex(c => Math.max(0, c - 1))}
-              disabled={currentIndex === 0}
-              className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${currentIndex === 0 ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-400' : 'bg-gray-800 text-white hover:bg-gray-700'}`}
-            >
+            <button onClick={() => setCurrentIndex(c => Math.max(0, c - 1))} disabled={currentIndex === 0} className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${currentIndex === 0 ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-400' : 'bg-gray-800 text-white hover:bg-gray-700'}`}>
               <ChevronLeft size={20} /> Newer
             </button>
-            <span className="text-xs text-gray-500 font-mono">
-              {currentIndex + 1} / {dailyData.length}
-            </span>
-            <button
-              onClick={() => setCurrentIndex(c => Math.min(dailyData.length - 1, c + 1))}
-              disabled={currentIndex === dailyData.length - 1}
-              className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${currentIndex === dailyData.length - 1 ? 'opacity-30 cursor-not-allowed bg-amber-600 text-white' : 'bg-amber-500 text-gray-950 hover:bg-amber-400 shadow-lg shadow-amber-500/20'}`}
-            >
+            <span className="text-xs text-gray-500 font-mono">{currentIndex + 1} / {dailyData.length}</span>
+            <button onClick={() => setCurrentIndex(c => Math.min(dailyData.length - 1, c + 1))} disabled={currentIndex === dailyData.length - 1} className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${currentIndex === dailyData.length - 1 ? 'opacity-30 cursor-not-allowed bg-amber-600 text-white' : 'bg-amber-500 text-gray-950 hover:bg-amber-400 shadow-lg shadow-amber-500/20'}`}>
               Older <ChevronRight size={20} />
             </button>
           </div>
