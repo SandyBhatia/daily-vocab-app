@@ -19,10 +19,18 @@ const db = getFirestore(app);
 // 2. Initialize Gemini
 const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
 
+// Helper to prevent Firestore from hanging indefinitely
+const withTimeout = (promise, ms, timeoutMsg) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMsg)), ms))
+  ]);
+
 export default function App() {
   const [dailyData, setDailyData] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingStatus, setLoadingStatus] = useState('Curating executive vocabulary...');
   const [error, setError] = useState(null);
 
   // Swipe State
@@ -35,9 +43,17 @@ export default function App() {
   }, []);
 
   const loadHistory = async () => {
+    if (!firebaseConfig.projectId) {
+      setError("Firebase Project ID is missing. Check your Vercel Environment Variables.");
+      return;
+    }
     try {
       const q = query(collection(db, "vocabHistory"), orderBy("timestamp", "desc"), limit(240));
-      const querySnapshot = await getDocs(q);
+      const querySnapshot = await withTimeout(
+        getDocs(q),
+        8000,
+        "Database connection timed out. Verify Cloud Firestore is created in Firebase Console."
+      );
       const history = [];
       querySnapshot.forEach((doc) => history.push(doc.data()));
       
@@ -46,16 +62,20 @@ export default function App() {
       }
     } catch (err) {
       console.error("Error loading history:", err);
-      setError(err.message || "Failed to connect to database.");
+      setError(err.message || "Failed to load history from Firebase.");
     }
   };
 
   const generateNewBriefing = async () => {
     setIsLoading(true);
     setError(null);
+    setLoadingStatus('Curating executive vocabulary with Gemini...');
+
     try {
-      // Corrected to the stable 3.8 flash model
-      const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
+      const model = genAI.getGenerativeModel({
+        model: "gemini-3.8-flash",
+        generationConfig: { responseMimeType: "application/json" }
+      });
       
       const existingTerms = dailyData.map(item => item.term).join(', ');
       const exclusionRule = existingTerms 
@@ -67,7 +87,7 @@ export default function App() {
       Ensure the words are distinct from basic vocabulary.
       ${exclusionRule}
       
-      Return ONLY a valid JSON array matching this exact structure, with no markdown formatting, markdown blocks, or extra text:
+      Return ONLY a valid JSON array matching this exact structure:
       [
         {
           "type": "word", 
@@ -79,15 +99,30 @@ export default function App() {
         }
       ]`;
 
-      const result = await model.generateContent(prompt);
+      const result = await withTimeout(
+        model.generateContent(prompt),
+        25000,
+        "Gemini request timed out. Please try again."
+      );
       const responseText = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '');
       const parsedData = JSON.parse(responseText);
 
       const timestamp = new Date().toISOString();
       const itemsToSave = parsedData.map(item => ({ ...item, timestamp }));
 
-      const batchPromises = itemsToSave.map(item => addDoc(collection(db, "vocabHistory"), item));
-      await Promise.all(batchPromises);
+      // Show cards right away, then attempt Firebase save with timeout
+      setLoadingStatus('Saving briefing to cloud archive...');
+      try {
+        const batchPromises = itemsToSave.map(item => addDoc(collection(db, "vocabHistory"), item));
+        await withTimeout(
+          Promise.all(batchPromises),
+          8000,
+          "Cards generated, but Firebase save timed out. Ensure Firestore Database is created & Rules allow writes."
+        );
+      } catch (dbErr) {
+        console.error("Firestore save error:", dbErr);
+        setError(dbErr.message);
+      }
 
       setDailyData(prev => [...itemsToSave, ...prev].slice(0, 240));
       setCurrentIndex(0);
@@ -148,7 +183,6 @@ export default function App() {
         <h1 className="text-3xl font-bold text-amber-500 mb-4">Daily Briefing</h1>
         <p className="text-gray-400 mb-6">No vocabulary history found. Generate your first briefing!</p>
         
-        {/* ADDED: Error message will now show here if something breaks! */}
         {error && (
           <div className="mb-6 p-4 bg-red-900/20 border border-red-900 rounded-lg max-w-sm w-full">
             <p className="text-red-400 text-sm font-mono break-words">{error}</p>
@@ -186,12 +220,12 @@ export default function App() {
         </div>
       </header>
 
-      {error && <p className="text-red-400 mb-4 text-sm bg-red-900/20 p-3 rounded-lg border border-red-900">{error}</p>}
+      {error && <p className="text-red-400 mb-4 text-xs font-mono bg-red-900/20 p-3 rounded-lg border border-red-900">{error}</p>}
 
       {isLoading ? (
         <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 border border-gray-800 rounded-2xl min-h-[450px]">
           <Loader2 size={48} className="text-amber-500 animate-spin mb-4" />
-          <p className="text-gray-400 animate-pulse">Curating executive vocabulary...</p>
+          <p className="text-gray-400 animate-pulse text-sm">{loadingStatus}</p>
         </div>
       ) : (
         <>
