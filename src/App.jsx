@@ -89,7 +89,6 @@ const withTimeout = (promise, ms, timeoutMsg) =>
     new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMsg)), ms))
   ]);
 
-// Full-quality Gemini 3.8 Flash caller (no lite downgrade)
 async function callGeminiFull(apiKey, prompt, timeoutMs = 30000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -288,7 +287,6 @@ Return ONLY a valid JSON array:
   const speakText = (text) => {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
-      // Strip regional tags like "(Texas)" or "(Canadian)" before speaking
       const cleanTerm = text.replace(/\s*\([^)]*\)/g, '');
       window.speechSynthesis.speak(new SpeechSynthesisUtterance(cleanTerm));
     }
@@ -299,83 +297,122 @@ Return ONLY a valid JSON array:
     return new Date(isoString).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
-  const uniqueDates = [...new Set(dailyData.map(item => formatDate(item.timestamp)))];
+  const currentItem = dailyData[currentIndex] || STARTER_DECK[0];
+  const currentDateStr = formatDate(currentItem?.timestamp);
 
-  const handleDateJump = (e) => {
-    const targetIndex = dailyData.findIndex(item => formatDate(item.timestamp) === e.target.value);
+  // Build ordered list of unique saved days + item counts
+  const uniqueDates = [...new Set(dailyData.map(item => formatDate(item.timestamp)))];
+  const currentDayIdx = uniqueDates.indexOf(currentDateStr);
+  const currentDayItems = dailyData.filter(item => formatDate(item.timestamp) === currentDateStr);
+  const indexInDay = Math.max(0, currentDayItems.indexOf(currentItem));
+
+  const jumpToDate = (dateStr) => {
+    const targetIndex = dailyData.findIndex(item => formatDate(item.timestamp) === dateStr);
     if (targetIndex !== -1) setCurrentIndex(targetIndex);
   };
 
-  const currentItem = dailyData[currentIndex] || STARTER_DECK[0];
-  const dotIndex = currentIndex % 8;
-
   return (
-    <div className="min-h-screen flex flex-col p-4 md:p-8 max-w-md mx-auto">
-      <header className="mb-6 mt-4 flex justify-between items-start gap-2">
-        <div>
-          <h1 className="text-3xl font-bold text-amber-500">Daily Briefing</h1>
-          <p className="text-gray-400 text-xs tracking-widest uppercase mt-1">
-            30-Day Archive ({dailyData.length} items)
-            {isBgSyncing && <span className="text-amber-400 ml-2">• Curating +7...</span>}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {uniqueDates.length > 1 && (
-            <select
-              value={formatDate(currentItem?.timestamp)}
-              onChange={handleDateJump}
-              className="bg-gray-800 text-gray-200 text-xs rounded-lg px-2.5 py-2 border border-gray-700 focus:outline-none focus:border-amber-500"
-            >
-              {uniqueDates.map(dateStr => (
-                <option key={dateStr} value={dateStr}>{dateStr}</option>
-              ))}
-            </select>
-          )}
+    <div className="min-h-screen flex flex-col justify-between p-4 md:py-5 md:px-6 max-w-md mx-auto">
+      <div>
+        {/* Header */}
+        <header className="mb-3 flex justify-between items-center gap-2">
+          <div>
+            <h1 className="text-2xl md:text-3xl font-bold text-amber-500 leading-tight">Daily Briefing</h1>
+            <p className="text-gray-400 text-[11px] tracking-widest uppercase mt-0.5">
+              30-Day Archive ({dailyData.length} items)
+              {isBgSyncing && <span className="text-amber-400 ml-2">• Curating +7...</span>}
+            </p>
+          </div>
           <button
             onClick={generateNewBriefing}
             disabled={isLoading || isBgSyncing}
             title="Generate fresh daily briefing"
-            className="p-2 bg-gray-800 rounded-full text-amber-500 hover:bg-gray-700 transition disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-2 bg-gray-800 rounded-xl text-amber-500 hover:bg-gray-700 transition disabled:opacity-50 text-xs font-semibold border border-gray-700"
           >
-            {isLoading || isBgSyncing ? <Loader2 size={20} className="animate-spin" /> : <RefreshCw size={20} />}
+            {isLoading || isBgSyncing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+            <span>New Briefing</span>
           </button>
-        </div>
-      </header>
+        </header>
 
-      {error && (
-        <p className="text-red-400 mb-4 text-xs font-mono bg-red-900/20 p-3 rounded-lg border border-red-900">
-          {error}
-        </p>
-      )}
+        {/* Always-Visible Day / Date Archive Selector */}
+        <div className="mb-3 bg-gray-900/90 border border-gray-800 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <Calendar size={14} className="text-amber-500 shrink-0" />
+            <select
+              value={currentDateStr}
+              onChange={(e) => jumpToDate(e.target.value)}
+              aria-label="Select briefing date"
+              className="bg-transparent text-gray-200 text-xs font-medium focus:outline-none cursor-pointer truncate w-full"
+            >
+              {uniqueDates.map((dateStr, idx) => {
+                const count = dailyData.filter(i => formatDate(i.timestamp) === dateStr).length;
+                const label = idx === 0 ? `${dateStr} (Latest • ${count})` : `${dateStr} (${count} cards)`;
+                return (
+                  <option key={dateStr} value={dateStr} className="bg-gray-900 text-gray-200">
+                    {label}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+
+          {uniqueDates.length > 1 && (
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                onClick={() => jumpToDate(uniqueDates[currentDayIdx + 1])}
+                disabled={currentDayIdx >= uniqueDates.length - 1}
+                className="px-2 py-1 text-[11px] rounded bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                Prev Day
+              </button>
+              <button
+                onClick={() => jumpToDate(uniqueDates[currentDayIdx - 1])}
+                disabled={currentDayIdx <= 0}
+                className="px-2 py-1 text-[11px] rounded bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                Next Day
+              </button>
+            </div>
+          )}
+        </div>
+
+        {error && (
+          <p className="text-red-400 mb-3 text-xs font-mono bg-red-900/20 p-2.5 rounded-lg border border-red-900">
+            {error}
+          </p>
+        )}
+      </div>
 
       {isLoading ? (
-        <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 border border-gray-800 rounded-2xl min-h-[450px]">
-          <Loader2 size={48} className="text-amber-500 animate-spin mb-4" />
+        <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 border border-gray-800 rounded-2xl min-h-[380px]">
+          <Loader2 size={44} className="text-amber-500 animate-spin mb-4" />
           <p className="text-gray-400 animate-pulse text-sm">Curating first executive word ({elapsedSeconds}s)...</p>
         </div>
       ) : (
         <>
-          <div className="flex justify-center gap-2 mb-6">
-            {[...Array(Math.min(8, dailyData.length))].map((_, idx) => (
+          {/* Progress Dots for Current Day */}
+          <div className="flex justify-center gap-1.5 mb-3">
+            {[...Array(Math.min(8, currentDayItems.length))].map((_, idx) => (
               <div
                 key={idx}
                 className={`h-1.5 rounded-full transition-all duration-300 ${
-                  idx === dotIndex ? 'w-6 bg-amber-500' : 'w-2 bg-gray-700'
+                  idx === (indexInDay % 8) ? 'w-6 bg-amber-500' : 'w-2 bg-gray-700'
                 }`}
               />
             ))}
           </div>
 
+          {/* Flashcard */}
           <div
             onTouchStart={onTouchStart}
             onTouchMove={onTouchMove}
             onTouchEnd={onTouchEnd}
-            className="flex-1 flex flex-col bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-2xl relative min-h-[450px]"
+            className="flex-1 flex flex-col bg-gray-900 border border-gray-800 rounded-2xl p-5 shadow-2xl relative min-h-[380px]"
           >
-            <div className="flex justify-between items-start mb-6">
-              <div className="flex items-center gap-3">
+            <div className="flex justify-between items-center mb-4">
+              <div className="flex items-center gap-2.5">
                 <span
-                  className={`text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider ${
+                  className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider ${
                     currentItem?.type === 'word'
                       ? 'bg-amber-900/40 text-amber-500 border border-amber-800'
                       : 'bg-blue-900/40 text-blue-400 border border-blue-800'
@@ -383,8 +420,8 @@ Return ONLY a valid JSON array:
                 >
                   {currentItem?.type?.toUpperCase()}
                 </span>
-                <span className="text-xs text-gray-500 flex items-center gap-1 font-medium">
-                  <Calendar size={12} /> {formatDate(currentItem?.timestamp)}
+                <span className="text-xs text-gray-500 font-medium">
+                  Card {indexInDay + 1} of {currentDayItems.length}
                 </span>
               </div>
               <button
@@ -396,58 +433,61 @@ Return ONLY a valid JSON array:
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto pr-2 pb-4" style={{ scrollbarWidth: 'thin' }}>
-              <h2 className="text-3xl md:text-4xl font-extrabold mb-1 tracking-tight text-white">
+            <div className="flex-1 overflow-y-auto pr-1" style={{ scrollbarWidth: 'thin' }}>
+              <h2 className="text-2xl md:text-3xl font-extrabold mb-0.5 tracking-tight text-white">
                 {currentItem?.term}
               </h2>
-              <p className="text-gray-500 text-sm font-mono mb-6 italic">{currentItem?.pronunciation}</p>
+              <p className="text-gray-500 text-xs font-mono mb-4 italic">{currentItem?.pronunciation}</p>
 
-              <div className="space-y-6">
+              <div className="space-y-4">
                 <div>
-                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Meaning</h3>
-                  <p className="text-lg text-gray-200 leading-relaxed">{currentItem?.meaning}</p>
+                  <h3 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Meaning</h3>
+                  <p className="text-base text-gray-200 leading-relaxed">{currentItem?.meaning}</p>
                 </div>
-                <div className="bg-gray-800/50 p-4 rounded-xl border border-gray-800">
-                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+                <div className="bg-gray-800/50 p-3.5 rounded-xl border border-gray-800">
+                  <h3 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span> Professional Context
                   </h3>
-                  <p className="text-gray-300 italic">"{currentItem?.professionalExample}"</p>
+                  <p className="text-sm text-gray-300 italic leading-relaxed">"{currentItem?.professionalExample}"</p>
                 </div>
-                <div className="bg-gray-800/50 p-4 rounded-xl border border-gray-800">
-                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+                <div className="bg-gray-800/50 p-3.5 rounded-xl border border-gray-800">
+                  <h3 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span> Casual / Personal
                   </h3>
-                  <p className="text-gray-300 italic">"{currentItem?.personalExample}"</p>
+                  <p className="text-sm text-gray-300 italic leading-relaxed">"{currentItem?.personalExample}"</p>
                 </div>
               </div>
             </div>
           </div>
 
-          <div className="flex justify-between items-center mt-8 px-2">
+          {/* Bottom Card Navigation: Previous (Left) & Next (Right) */}
+          <div className="flex justify-between items-center mt-4 pt-1">
             <button
               onClick={() => setCurrentIndex(c => Math.max(0, c - 1))}
               disabled={currentIndex === 0}
-              className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${
+              className={`flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-medium transition ${
                 currentIndex === 0
                   ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-400'
-                  : 'bg-gray-800 text-white hover:bg-gray-700'
+                  : 'bg-gray-800 text-white hover:bg-gray-700 active:scale-95'
               }`}
             >
-              <ChevronLeft size={20} /> Newer
+              <ChevronLeft size={18} /> Previous
             </button>
+
             <span className="text-xs text-gray-500 font-mono">
               {currentIndex + 1} / {dailyData.length}
             </span>
+
             <button
               onClick={() => setCurrentIndex(c => Math.min(dailyData.length - 1, c + 1))}
               disabled={currentIndex === dailyData.length - 1}
-              className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${
+              className={`flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-sm font-semibold transition ${
                 currentIndex === dailyData.length - 1
                   ? 'opacity-30 cursor-not-allowed bg-amber-600 text-white'
-                  : 'bg-amber-500 text-gray-950 hover:bg-amber-400 shadow-lg shadow-amber-500/20'
+                  : 'bg-amber-500 text-gray-950 hover:bg-amber-400 active:scale-95 shadow-lg shadow-amber-500/20'
               }`}
             >
-              Older <ChevronRight size={20} />
+              Next <ChevronRight size={18} />
             </button>
           </div>
         </>
