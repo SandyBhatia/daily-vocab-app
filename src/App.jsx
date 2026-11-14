@@ -19,7 +19,7 @@ const db = getFirestore(app);
 // 2. Initialize Gemini
 const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
 
-// Helper to prevent Firestore from hanging indefinitely
+// Helper to prevent network/database calls from hanging indefinitely
 const withTimeout = (promise, ms, timeoutMsg) =>
   Promise.race([
     promise,
@@ -84,7 +84,7 @@ export default function App() {
 
       const prompt = `You are a vocabulary curator for a traveling executive based in Dallas. 
       Generate a JSON array containing exactly 8 items: 5 advanced, highly articulate words (the kind used by top executives, Big 4 analysts, or politicians like Barack Obama or Shashi Tharoor) and 3 North American slangs (include at least one Texas regionalism and one Canadian term). 
-      Ensure the words are distinct from basic vocabulary.
+      Ensure the words are distinct from basic vocabulary. Keep each meaning and example crisp and concise (1 to 2 sentences max).
       ${exclusionRule}
       
       Return ONLY a valid JSON array matching this exact structure:
@@ -101,8 +101,8 @@ export default function App() {
 
       const result = await withTimeout(
         model.generateContent(prompt),
-        25000,
-        "Gemini request timed out. Please try again."
+        90000,
+        "Gemini request timed out after 90 seconds. Please try again."
       );
       const responseText = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '');
       const parsedData = JSON.parse(responseText);
@@ -110,7 +110,6 @@ export default function App() {
       const timestamp = new Date().toISOString();
       const itemsToSave = parsedData.map(item => ({ ...item, timestamp }));
 
-      // Show cards right away, then attempt Firebase save with timeout
       setLoadingStatus('Saving briefing to cloud archive...');
       try {
         const batchPromises = itemsToSave.map(item => addDoc(collection(db, "vocabHistory"), item));
@@ -280,16 +279,4 @@ export default function App() {
           </div>
 
           <div className="flex justify-between items-center mt-8 px-2">
-            <button onClick={() => setCurrentIndex(c => Math.max(0, c - 1))} disabled={currentIndex === 0} className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${currentIndex === 0 ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-400' : 'bg-gray-800 text-white hover:bg-gray-700'}`}>
-              <ChevronLeft size={20} /> Newer
-            </button>
-            <span className="text-xs text-gray-500 font-mono">{currentIndex + 1} / {dailyData.length}</span>
-            <button onClick={() => setCurrentIndex(c => Math.min(dailyData.length - 1, c + 1))} disabled={currentIndex === dailyData.length - 1} className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${currentIndex === dailyData.length - 1 ? 'opacity-30 cursor-not-allowed bg-amber-600 text-white' : 'bg-amber-500 text-gray-950 hover:bg-amber-400 shadow-lg shadow-amber-500/20'}`}>
-              Older <ChevronRight size={20} />
-            </button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
+            <button onClick={() => setCurrentIndex(c => Math.max(0, c - 1))} disabled={currentIndex === 0} className={`flex items-center gap-2 px-5 py-3 rounded-xl
