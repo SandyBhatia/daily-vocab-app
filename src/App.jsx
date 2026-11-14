@@ -15,18 +15,49 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// Helper to prevent database calls from hanging
 const withTimeout = (promise, ms, timeoutMsg) =>
   Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMsg)), ms))
   ]);
 
+const callGeminiAPI = async (apiKey, prompt, useMinimalThinking = true) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45000);
+
+  const generationConfig = {
+    responseMimeType: "application/json",
+    ...(useMinimalThinking ? { thinkingConfig: { thinkingLevel: "MINIMAL" } } : {})
+  };
+
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey.trim()}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig
+      })
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error("Gemini API did not respond within 45s. Check the Network tab in DevTools.");
+    }
+    throw err;
+  }
+};
+
 export default function App() {
   const [dailyData, setDailyData] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState('Curating executive vocabulary...');
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [error, setError] = useState(null);
 
   const [touchStart, setTouchStart] = useState(null);
@@ -36,6 +67,15 @@ export default function App() {
   useEffect(() => {
     loadHistory();
   }, []);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const timer = setInterval(() => setElapsedSeconds(s => s + 1), 1000);
+    return () => clearInterval(timer);
+  }, [isLoading]);
 
   const loadHistory = async () => {
     if (!firebaseConfig.projectId) {
@@ -64,44 +104,41 @@ export default function App() {
   const generateNewBriefing = async () => {
     setIsLoading(true);
     setError(null);
-    setLoadingStatus('Connecting directly to Gemini API...');
+    setLoadingStatus('Curating vocabulary with Gemini...');
 
     try {
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
       if (!apiKey) throw new Error("Gemini API Key is missing in Vercel.");
 
-      const existingTerms = dailyData.map(item => item.term).join(', ');
+      const existingTerms = dailyData.slice(0, 80).map(item => item.term).join(', ');
       const exclusionRule = existingTerms 
-        ? `Do NOT repeat any of these previously generated words or slangs from the last 30 days: ${existingTerms}.` 
+        ? `Do NOT repeat any of these previously generated terms: ${existingTerms}.` 
         : '';
 
-      const prompt = `You are a vocabulary curator for a traveling executive based in Dallas. 
-      Generate a JSON array containing exactly 8 items: 5 advanced, highly articulate words (the kind used by top executives, Big 4 analysts, or politicians like Barack Obama or Shashi Tharoor) and 3 North American slangs (include at least one Texas regionalism and one Canadian term). 
-      Ensure the words are distinct from basic vocabulary. Keep each meaning and example crisp and concise (1 to 2 sentences max).
-      ${exclusionRule}
-      
-      Return ONLY a valid JSON array matching this exact structure:
-      [
-        {
-          "type": "word", 
-          "term": "string",
-          "pronunciation": "string",
-          "meaning": "string",
-          "personalExample": "string",
-          "professionalExample": "string"
-        }
-      ]`;
+      const prompt = `You are a vocabulary curator for a traveling executive based in Dallas.
+Generate a JSON array of exactly 8 items:
+- 5 medium-to-difficult executive words (used by senior executives, Big 4 analysts, or leaders like Barack Obama or Shashi Tharoor)
+- 3 North American slangs (mix of everyday US corporate/social slang, Texas regionalisms, and Canadian slang)
+Keep each meaning and example crisp (1 sentence each). ${exclusionRule}
 
-      // Direct REST API Call (Bypasses all SDK hangs)
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: "application/json" }
-        })
-      });
+Return ONLY a valid JSON array with this exact schema:
+[
+  {
+    "type": "word",
+    "term": "string",
+    "pronunciation": "string",
+    "meaning": "string",
+    "personalExample": "string",
+    "professionalExample": "string"
+  }
+]`;
+
+      let response = await callGeminiAPI(apiKey, prompt, true);
+
+      // Fallback without thinkingConfig if the endpoint rejects thinkingLevel
+      if (response.status === 400) {
+        response = await callGeminiAPI(apiKey, prompt, false);
+      }
 
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
@@ -109,8 +146,9 @@ export default function App() {
       }
 
       const data = await response.json();
-      const responseText = data.candidates[0].content.parts[0].text.trim().replace(/```json/g, '').replace(/```/g, '');
-      const parsedData = JSON.parse(responseText);
+      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const cleanedText = rawText.trim().replace(/```json/g, '').replace(/```/g, '');
+      const parsedData = JSON.parse(cleanedText);
 
       const timestamp = new Date().toISOString();
       const itemsToSave = parsedData.map(item => ({ ...item, timestamp }));
@@ -118,7 +156,7 @@ export default function App() {
       setLoadingStatus('Saving briefing to cloud archive...');
       try {
         const batchPromises = itemsToSave.map(item => addDoc(collection(db, "vocabHistory"), item));
-        await withTimeout(Promise.all(batchPromises), 8000, "Cards generated locally, but Firebase save timed out.");
+        await withTimeout(Promise.all(batchPromises), 8000, "Cards generated, but Firebase save timed out.");
       } catch (dbErr) {
         console.error("Firestore save error:", dbErr);
         setError(dbErr.message);
@@ -153,6 +191,7 @@ export default function App() {
 
   const speakText = (text) => {
     if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
       window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
     }
   };
@@ -215,7 +254,7 @@ export default function App() {
       {isLoading ? (
         <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 border border-gray-800 rounded-2xl min-h-[450px]">
           <Loader2 size={48} className="text-amber-500 animate-spin mb-4" />
-          <p className="text-gray-400 animate-pulse text-sm">{loadingStatus}</p>
+          <p className="text-gray-400 animate-pulse text-sm">{loadingStatus} ({elapsedSeconds}s)</p>
         </div>
       ) : (
         <>
