@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { Volume2, ChevronLeft, ChevronRight, Loader2, RefreshCw, Calendar } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // 1. Initialize Firebase
 const firebaseConfig = {
@@ -16,10 +15,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// 2. Initialize Gemini
-const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
-
-// Helper to prevent network/database calls from hanging indefinitely
+// Helper to prevent database calls from hanging
 const withTimeout = (promise, ms, timeoutMsg) =>
   Promise.race([
     promise,
@@ -33,7 +29,6 @@ export default function App() {
   const [loadingStatus, setLoadingStatus] = useState('Curating executive vocabulary...');
   const [error, setError] = useState(null);
 
-  // Swipe State
   const [touchStart, setTouchStart] = useState(null);
   const [touchEnd, setTouchEnd] = useState(null);
   const minSwipeDistance = 50;
@@ -69,14 +64,12 @@ export default function App() {
   const generateNewBriefing = async () => {
     setIsLoading(true);
     setError(null);
-    setLoadingStatus('Curating executive vocabulary with Gemini...');
+    setLoadingStatus('Connecting directly to Gemini API...');
 
     try {
-      const model = genAI.getGenerativeModel({
-        model: "gemini-3.8-flash",
-        generationConfig: { responseMimeType: "application/json" }
-      });
-      
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      if (!apiKey) throw new Error("Gemini API Key is missing in Vercel.");
+
       const existingTerms = dailyData.map(item => item.term).join(', ');
       const exclusionRule = existingTerms 
         ? `Do NOT repeat any of these previously generated words or slangs from the last 30 days: ${existingTerms}.` 
@@ -99,12 +92,24 @@ export default function App() {
         }
       ]`;
 
-      const result = await withTimeout(
-        model.generateContent(prompt),
-        90000,
-        "Gemini request timed out after 90 seconds. Please try again."
-      );
-      const responseText = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '');
+      // Direct REST API Call (Bypasses all SDK hangs)
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: "application/json" }
+        })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(`Gemini API Error (${response.status}): ${errData?.error?.message || response.statusText}`);
+      }
+
+      const data = await response.json();
+      const responseText = data.candidates[0].content.parts[0].text.trim().replace(/```json/g, '').replace(/```/g, '');
       const parsedData = JSON.parse(responseText);
 
       const timestamp = new Date().toISOString();
@@ -113,11 +118,7 @@ export default function App() {
       setLoadingStatus('Saving briefing to cloud archive...');
       try {
         const batchPromises = itemsToSave.map(item => addDoc(collection(db, "vocabHistory"), item));
-        await withTimeout(
-          Promise.all(batchPromises),
-          8000,
-          "Cards generated, but Firebase save timed out. Ensure Firestore Database is created & Rules allow writes."
-        );
+        await withTimeout(Promise.all(batchPromises), 8000, "Cards generated locally, but Firebase save timed out.");
       } catch (dbErr) {
         console.error("Firestore save error:", dbErr);
         setError(dbErr.message);
@@ -127,7 +128,7 @@ export default function App() {
       setCurrentIndex(0);
     } catch (err) {
       console.error(err);
-      setError(err.message || "Failed to generate new vocabulary. Please check API keys.");
+      setError(err.message || "Failed to generate new vocabulary.");
     } finally {
       setIsLoading(false);
     }
@@ -146,18 +147,13 @@ export default function App() {
     if (!touchStart || !touchEnd) return;
     const distance = touchStart - touchEnd;
     
-    if (distance > minSwipeDistance && currentIndex < dailyData.length - 1) {
-      setCurrentIndex(c => c + 1);
-    }
-    if (distance < -minSwipeDistance && currentIndex > 0) {
-      setCurrentIndex(c => c - 1);
-    }
+    if (distance > minSwipeDistance && currentIndex < dailyData.length - 1) setCurrentIndex(c => c + 1);
+    if (distance < -minSwipeDistance && currentIndex > 0) setCurrentIndex(c => c - 1);
   };
 
   const speakText = (text) => {
     if ('speechSynthesis' in window) {
-      const utterance = new SpeechSynthesisUtterance(text);
-      window.speechSynthesis.speak(utterance);
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
     }
   };
 
@@ -169,11 +165,8 @@ export default function App() {
   const uniqueDates = [...new Set(dailyData.map(item => formatDate(item.timestamp)))];
 
   const handleDateJump = (e) => {
-    const selectedDate = e.target.value;
-    const targetIndex = dailyData.findIndex(item => formatDate(item.timestamp) === selectedDate);
-    if (targetIndex !== -1) {
-      setCurrentIndex(targetIndex);
-    }
+    const targetIndex = dailyData.findIndex(item => formatDate(item.timestamp) === e.target.value);
+    if (targetIndex !== -1) setCurrentIndex(targetIndex);
   };
 
   if (dailyData.length === 0 && !isLoading) {
@@ -208,9 +201,7 @@ export default function App() {
         <div className="flex items-center gap-2">
           {uniqueDates.length > 1 && (
             <select value={formatDate(currentItem?.timestamp)} onChange={handleDateJump} className="bg-gray-800 text-gray-200 text-xs rounded-lg px-2.5 py-2 border border-gray-700 focus:outline-none focus:border-amber-500">
-              {uniqueDates.map(dateStr => (
-                <option key={dateStr} value={dateStr}>{dateStr}</option>
-              ))}
+              {uniqueDates.map(dateStr => <option key={dateStr} value={dateStr}>{dateStr}</option>)}
             </select>
           )}
           <button onClick={generateNewBriefing} disabled={isLoading} className="p-2 bg-gray-800 rounded-full text-amber-500 hover:bg-gray-700 transition disabled:opacity-50">
@@ -279,4 +270,16 @@ export default function App() {
           </div>
 
           <div className="flex justify-between items-center mt-8 px-2">
-            <button onClick={() => setCurrentIndex(c => Math.max(0, c - 1))} disabled={currentIndex === 0} className={`flex items-center gap-2 px-5 py-3 rounded-xl
+            <button onClick={() => setCurrentIndex(c => Math.max(0, c - 1))} disabled={currentIndex === 0} className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${currentIndex === 0 ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-400' : 'bg-gray-800 text-white hover:bg-gray-700'}`}>
+              <ChevronLeft size={20} /> Newer
+            </button>
+            <span className="text-xs text-gray-500 font-mono">{currentIndex + 1} / {dailyData.length}</span>
+            <button onClick={() => setCurrentIndex(c => Math.min(dailyData.length - 1, c + 1))} disabled={currentIndex === dailyData.length - 1} className={`flex items-center gap-2 px-5 py-3 rounded-xl font-medium transition ${currentIndex === dailyData.length - 1 ? 'opacity-30 cursor-not-allowed bg-amber-600 text-white' : 'bg-amber-500 text-gray-950 hover:bg-amber-400 shadow-lg shadow-amber-500/20'}`}>
+              Older <ChevronRight size={20} />
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
