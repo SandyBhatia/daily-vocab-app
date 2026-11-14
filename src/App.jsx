@@ -54,8 +54,8 @@ export default function App() {
     setIsLoading(true);
     setError(null);
     try {
-      // Corrected to the stable 2.5 flash model
-      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+      // Corrected to the stable 3.8 flash model
+      const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
       
       const existingTerms = dailyData.map(item => item.term).join(', ');
       const exclusionRule = existingTerms 
