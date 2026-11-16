@@ -31,37 +31,57 @@ const getHourInTimeZone = (dateInput = new Date(), timeZone = 'America/Chicago')
   }
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function generateWithGemini(apiKey, prompt) {
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+  // Full-quality cascade: primary fast model -> full Pro model on 503 demand spikes
+  const attempts = [
+    { model: 'gemini-3.8-flash', useLowThinking: true },
+    { model: 'gemini-3.8-flash', useLowThinking: true },
+    { model: 'gemini-3.8-pro', useLowThinking: true }
+  ];
 
-  const runRequest = async (useLowThinking) => {
-    const generationConfig = {
-      responseMimeType: 'application/json',
-      temperature: 0.85,
-      ...(useLowThinking ? { thinkingConfig: { thinkingLevel: 'low' } } : {})
-    };
+  let lastError = null;
 
-    return fetch(geminiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig
-      })
-    });
-  };
+  for (let i = 0; i < attempts.length; i++) {
+    const { model, useLowThinking } = attempts[i];
+    if (i > 0) await sleep(1500 * i);
 
-  let geminiRes = await runRequest(true);
-  if (geminiRes.status === 400) {
-    geminiRes = await runRequest(false);
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    const send = (withThinking) =>
+      fetch(geminiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            temperature: 0.85,
+            ...(withThinking ? { thinkingConfig: { thinkingLevel: 'low' } } : {})
+          }
+        })
+      });
+
+    let res = await send(useLowThinking);
+    if (res.status === 400 && useLowThinking) {
+      res = await send(false);
+    }
+
+    if (res.ok) {
+      return res.json();
+    }
+
+    const errData = await res.json().catch(() => ({}));
+    lastError = new Error(`Gemini API (${res.status}): ${errData?.error?.message || res.statusText}`);
+
+    // Retry/failover on transient overload (503/429/500) or retired model ID (404)
+    if (![429, 500, 502, 503, 504, 404].includes(res.status)) {
+      throw lastError;
+    }
   }
 
-  if (!geminiRes.ok) {
-    const errData = await geminiRes.json().catch(() => ({}));
-    throw new Error(`Gemini API (${geminiRes.status}): ${errData?.error?.message || geminiRes.statusText}`);
-  }
-
-  return geminiRes.json();
+  throw lastError || new Error('Gemini API is temporarily busy. Please try again in a moment.');
 }
 
 export default async function handler(req, res) {
@@ -123,7 +143,7 @@ export default async function handler(req, res) {
 
     const cardsNeeded = 8 - todaysCount;
 
-    // 4. Generate cards using gemini-3.8-flash with thinkingLevel: "low"
+    // 4. Generate cards with automatic 503 retry & Pro failover
     const existingTerms = existingDocs.slice(0, 120).map(d => d.term).filter(Boolean).join(', ');
     const bannedCliches = 'ubiquitous, perspicacious, sycophant, mellifluous, inexorable, paradigm, synergy, plethora, quintessential, dichotomy';
     const exclusionRule = `Never use basic GRE clichés (${bannedCliches}) or any previously generated terms: ${existingTerms}.`;
