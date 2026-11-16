@@ -253,7 +253,7 @@ Schema: [{"type":"word","term":"string","pronunciation":"string","meaning":"stri
           generationConfig: {
             responseMimeType: 'application/json',
             temperature: 0.85,
-            thinkingConfig: { thinkingLevel: 'minimal' }
+            thinkingConfig: { thinkingLevel: 'low' }
           }
         })
       });
