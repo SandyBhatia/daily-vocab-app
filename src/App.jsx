@@ -97,7 +97,6 @@ const withTimeout = (promise, ms, timeoutMsg) =>
     new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMsg)), ms))
   ]);
 
-// Local calendar date key (YYYY-MM-DD in user's local timezone)
 const getLocalDateKey = (dateInput = new Date()) => {
   const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
   const year = d.getFullYear();
@@ -106,40 +105,144 @@ const getLocalDateKey = (dateInput = new Date()) => {
   return `${year}-${month}-${day}`;
 };
 
-async function callGeminiFull(apiKey, prompt, timeoutMs = 30000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+// Incrementally parses complete JSON objects {...} out of a streaming JSON array
+function extractCompleteObjects(text) {
+  const results = [];
+  let inString = false;
+  let escapeNext = false;
+  let depth = 0;
+  let objStart = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (ch === '{') {
+        if (depth === 0) objStart = i;
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0 && objStart !== -1) {
+          const candidate = text.slice(objStart, i + 1);
+          try {
+            const parsed = JSON.parse(candidate);
+            if (parsed && parsed.term && parsed.meaning) {
+              results.push(parsed);
+            }
+          } catch (_) {
+            // Wait for valid JSON structure
+          }
+          objStart = -1;
+        }
+      }
+    }
+  }
+  return results;
+}
+
+// Streams full-quality gemini-3.8-flash cards progressively so Card 1 appears in ~2-3s
+async function streamGeminiBriefing(apiKey, prompt, onProgress, timeoutMs = 60000) {
+  const attemptStream = async (useThinkingCap) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    const generationConfig = {
+      responseMimeType: 'application/json',
+      temperature: 0.85,
+      ...(useThinkingCap ? { thinkingConfig: { thinkingBudget: 128 } } : {})
+    };
+
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key=${apiKey.trim()}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig
+        })
+      });
+
+      if (!response.ok) {
+        clearTimeout(timer);
+        const errData = await response.json().catch(() => ({}));
+        const err = new Error(`Gemini API (${response.status}): ${errData?.error?.message || response.statusText}`);
+        err.status = response.status;
+        throw err;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+      let accumulatedText = '';
+      let emittedCount = 0;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const payload = trimmed.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+
+          try {
+            const chunk = JSON.parse(payload);
+            const parts = chunk?.candidates?.[0]?.content?.parts || [];
+            for (const part of parts) {
+              if (part.text && !part.thought) {
+                accumulatedText += part.text;
+              }
+            }
+          } catch (_) {
+            // Skip incomplete SSE line
+          }
+        }
+
+        const objects = extractCompleteObjects(accumulatedText);
+        if (objects.length > emittedCount) {
+          emittedCount = objects.length;
+          onProgress(objects);
+        }
+      }
+
+      clearTimeout(timer);
+      const finalObjects = extractCompleteObjects(accumulatedText);
+      if (finalObjects.length === 0) {
+        throw new Error('Gemini returned an empty response. Please try again.');
+      }
+      return finalObjects;
+    } catch (err) {
+      clearTimeout(timer);
+      if (err.name === 'AbortError') {
+        throw new Error('Network timed out after 60s. Check your connection and try again.');
+      }
+      throw err;
+    }
+  };
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey.trim()}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.85
-        }
-      })
-    });
-    clearTimeout(timer);
-
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(`Gemini API (${response.status}): ${errData?.error?.message || response.statusText}`);
-    }
-
-    const data = await response.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    const match = rawText.match(/\[\s*\{.*\}\s*\]/s);
-    const cleaned = match ? match[0] : rawText.trim().replace(/```json/gi, '').replace(/```/g, '');
-    return JSON.parse(cleaned);
+    return await attemptStream(true);
   } catch (err) {
-    clearTimeout(timer);
-    if (err.name === 'AbortError') {
-      throw new Error(`Request exceeded ${timeoutMs / 1000}s. Please try again.`);
+    if (err.status === 400) {
+      return await attemptStream(false);
     }
     throw err;
   }
@@ -150,6 +253,7 @@ export default function App() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [isBgSyncing, setIsBgSyncing] = useState(false);
+  const [streamCount, setStreamCount] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [error, setError] = useState(null);
   const generationLockRef = useRef(false);
@@ -190,9 +294,8 @@ export default function App() {
     }
     try {
       const q = query(collection(db, 'vocabHistory'), orderBy('timestamp', 'desc'), limit(260));
-      const querySnapshot = await withTimeout(getDocs(q), 5000, 'Firestore timeout');
+      const querySnapshot = await withTimeout(getDocs(q), 6000, 'Firestore timeout');
 
-      // Deduplicate by (localDate + term) so any previously duplicated entries collapse cleanly
       const seen = new Set();
       const cleanedHistory = [];
       querySnapshot.forEach((doc) => {
@@ -217,9 +320,10 @@ export default function App() {
   };
 
   const todayKey = getLocalDateKey();
-  const hasTodaysBriefing = dailyData.some(
+  const todaysSavedCards = dailyData.filter(
     item => !item.isStarter && item.timestamp && getLocalDateKey(item.timestamp) === todayKey
   );
+  const hasTodaysBriefing = todaysSavedCards.length >= 8;
 
   const generateNewBriefing = async () => {
     if (generationLockRef.current || isLoading || isBgSyncing || hasTodaysBriefing) {
@@ -228,6 +332,9 @@ export default function App() {
     generationLockRef.current = true;
     setIsLoading(true);
     setError(null);
+    setStreamCount(0);
+
+    let streamedItems = [];
 
     try {
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
@@ -239,77 +346,67 @@ export default function App() {
       const exclusionRule = `Never use basic GRE clichés (${bannedCliches}) or any previously generated terms: ${existingTerms}.`;
       const batchTimestamp = new Date().toISOString();
 
-      const qualityStandards = `
-Quality & Tone Requirements:
-- Audience: A Dallas-based senior advisor / Big 4 consultant who travels across the US and Canada and socializes with local friends.
-- Executive Words: Must reflect the rhetorical weight, precision, and cadence of Barack Obama, Shashi Tharoor, or a senior partner—never basic business English.
+      const prompt = `You are a vocabulary curator for a Dallas-based senior advisor / Big 4 consultant who travels across the US and Canada and socializes with local friends.
+Generate a JSON array of exactly 8 items in this exact order:
+- Items 1 to 5 (type: "word"): Medium-to-difficult executive English words with the rhetorical weight, precision, and cadence of Barack Obama, Shashi Tharoor, or a senior partner—never basic business English.
+- Item 6 (type: "slang"): An everyday high-context American corporate/social idiom used in US client meetings and casual drinks.
+- Item 7 (type: "slang"): An authentic Texas / DFW regional expression (label region on the term, e.g., "Term (Texas)").
+- Item 8 (type: "slang"): An authentic Canadian expression used in Toronto or Calgary (label region on the term, e.g., "Term (Canadian)").
+
+Requirements:
 - Meaning: Nuanced, clear definition including subtle connotation or register.
-- Examples: Realistic, natural, multi-clause dialogue showing how an articulate leader or local friend actually uses the term in conversation (not stiff textbook sentences).`;
+- Examples: Realistic, natural, multi-clause dialogue showing how an articulate leader or local friend actually uses the term in conversation.
+- ${exclusionRule}
 
-      // STAGE 1: Fetch 1 high-caliber executive word (~2-3s)
-      const firstCardPrompt = `Generate a JSON array with exactly 1 medium-to-difficult executive English word.
-${qualityStandards}
-${exclusionRule}
-Return ONLY a valid JSON array:
+Return ONLY a valid JSON array matching this exact schema:
 [{"type":"word","term":"string","pronunciation":"string","meaning":"string","personalExample":"string","professionalExample":"string"}]`;
 
-      const firstBatch = await callGeminiFull(apiKey, firstCardPrompt, 20000);
-      const firstWord = firstBatch[0];
-      if (!firstWord?.term) throw new Error('Invalid response from Gemini.');
+      const deduplicateItems = (rawItems) => {
+        const seen = new Set(existingRealItems.map(i => i.term.toLowerCase().trim()));
+        const unique = [];
+        for (const item of rawItems) {
+          const key = (item.term || '').toLowerCase().trim();
+          if (key && !seen.has(key)) {
+            seen.add(key);
+            unique.push({ ...item, timestamp: batchTimestamp });
+          }
+          if (unique.length === 8) break;
+        }
+        return unique;
+      };
 
-      const firstStamped = [{ ...firstWord, timestamp: batchTimestamp }];
+      const finalRaw = await streamGeminiBriefing(
+        apiKey,
+        prompt,
+        (partialObjects) => {
+          const stamped = deduplicateItems(partialObjects);
+          if (stamped.length > 0) {
+            streamedItems = stamped;
+            setStreamCount(stamped.length);
+            setDailyData([...stamped, ...existingRealItems].slice(0, 240));
+            if (stamped.length === 1) {
+              setCurrentIndex(0);
+              setIsLoading(false);
+              setIsBgSyncing(true);
+            }
+          }
+        },
+        60000
+      );
 
-      // Replace placeholder starter deck cleanly, or prepend to existing real history
-      setDailyData([...firstStamped, ...existingRealItems].slice(0, 240));
-      setCurrentIndex(0);
-      setIsLoading(false);
-      saveItemsInBackground(firstStamped);
-
-      // STAGE 2: Parallel specialist calls for remaining 4 words + 3 slangs (~5-7s)
-      setIsBgSyncing(true);
-      const updatedExclusions = `${firstWord.term}, ${existingTerms}`;
-
-      const wordsPrompt = `Generate a JSON array with exactly 4 distinct medium-to-difficult executive English words.
-${qualityStandards}
-Never use basic GRE clichés (${bannedCliches}) or any of these terms: ${updatedExclusions}.
-Return ONLY a valid JSON array:
-[{"type":"word","term":"string","pronunciation":"string","meaning":"string","personalExample":"string","professionalExample":"string"}]`;
-
-      const slangPrompt = `Generate a JSON array with exactly 3 authentic North American slangs or idioms:
-1. One everyday high-context American corporate/social idiom used in US client meetings and casual drinks.
-2. One authentic Texas / DFW regional expression (label region in parentheses on the term, e.g., "Term (Texas)").
-3. One authentic Canadian expression used in cities like Toronto or Calgary (label region in parentheses on the term, e.g., "Term (Canadian)").
-${qualityStandards}
-Never repeat any of these terms: ${updatedExclusions}.
-Return ONLY a valid JSON array:
-[{"type":"slang","term":"string","pronunciation":"string","meaning":"string","personalExample":"string","professionalExample":"string"}]`;
-
-      const [wordsRes, slangRes] = await Promise.all([
-        callGeminiFull(apiKey, wordsPrompt, 30000),
-        callGeminiFull(apiKey, slangPrompt, 30000)
-      ]);
-
-      // Deduplicate against firstWord and cap at strictly 4 words + 3 slangs = 8 total cards for today
-      const seenToday = new Set([firstWord.term.toLowerCase().trim()]);
-      const uniqueWords = wordsRes
-        .filter(w => w?.term && !seenToday.has(w.term.toLowerCase().trim()) && seenToday.add(w.term.toLowerCase().trim()))
-        .slice(0, 4);
-      const uniqueSlangs = slangRes
-        .filter(s => s?.term && !seenToday.has(s.term.toLowerCase().trim()) && seenToday.add(s.term.toLowerCase().trim()))
-        .slice(0, 3);
-
-      const restStamped = [...uniqueWords, ...uniqueSlangs].map(item => ({
-        ...item,
-        timestamp: batchTimestamp
-      }));
-
-      setDailyData([...firstStamped, ...restStamped, ...existingRealItems].slice(0, 240));
-      saveItemsInBackground(restStamped);
+      const finalStamped = deduplicateItems(finalRaw);
+      if (finalStamped.length > 0) {
+        setDailyData([...finalStamped, ...existingRealItems].slice(0, 240));
+        saveItemsInBackground(finalStamped);
+      }
     } catch (err) {
       console.error(err);
+      if (streamedItems.length > 0) {
+        saveItemsInBackground(streamedItems);
+      }
       setError(err.message || 'Failed to generate new vocabulary.');
-      setIsLoading(false);
     } finally {
+      setIsLoading(false);
       setIsBgSyncing(false);
       generationLockRef.current = false;
     }
@@ -366,7 +463,7 @@ Return ONLY a valid JSON array:
             <h1 className="text-2xl md:text-3xl font-bold text-amber-500 leading-tight">Daily Briefing</h1>
             <p className="text-gray-400 text-[11px] tracking-widest uppercase mt-0.5">
               30-Day Archive ({dailyData.length} items)
-              {isBgSyncing && <span className="text-amber-400 ml-2">• Curating +7...</span>}
+              {isBgSyncing && <span className="text-amber-400 ml-2">• Streaming {streamCount}/8...</span>}
             </p>
           </div>
           <button
@@ -386,7 +483,7 @@ Return ONLY a valid JSON array:
             {isLoading || isBgSyncing ? (
               <>
                 <Loader2 size={16} className="animate-spin" />
-                <span>Curating...</span>
+                <span>{isBgSyncing ? `${streamCount}/8...` : 'Starting...'}</span>
               </>
             ) : hasTodaysBriefing ? (
               <>
@@ -454,7 +551,7 @@ Return ONLY a valid JSON array:
       {isLoading ? (
         <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 border border-gray-800 rounded-2xl min-h-[380px]">
           <Loader2 size={44} className="text-amber-500 animate-spin mb-4" />
-          <p className="text-gray-400 animate-pulse text-sm">Curating first executive word ({elapsedSeconds}s)...</p>
+          <p className="text-gray-400 animate-pulse text-sm">Streaming first executive word ({elapsedSeconds}s)...</p>
         </div>
       ) : (
         <>
