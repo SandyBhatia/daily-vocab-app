@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Volume2, ChevronLeft, ChevronRight, Loader2, RefreshCw, Calendar, CheckCircle2 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
+import { getFirestore, collection, doc, setDoc, addDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
 
-// 1. Initialize Firebase
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
@@ -15,7 +14,6 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// In-memory placeholder only (never written to Firestore)
 const STARTER_DECK = [
   {
     type: 'word',
@@ -97,173 +95,59 @@ const withTimeout = (promise, ms, timeoutMsg) =>
     new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMsg)), ms))
   ]);
 
-const getLocalDateKey = (dateInput = new Date()) => {
-  const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+const getDeviceTimeZone = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Chicago';
+  } catch (_) {
+    return 'America/Chicago';
+  }
 };
 
-// Incrementally parses complete JSON objects {...} out of a streaming JSON array
-function extractCompleteObjects(text) {
-  const results = [];
-  let inString = false;
-  let escapeNext = false;
-  let depth = 0;
-  let objStart = -1;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (escapeNext) {
-      escapeNext = false;
-      continue;
-    }
-    if (ch === '\\' && inString) {
-      escapeNext = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (!inString) {
-      if (ch === '{') {
-        if (depth === 0) objStart = i;
-        depth++;
-      } else if (ch === '}') {
-        depth--;
-        if (depth === 0 && objStart !== -1) {
-          const candidate = text.slice(objStart, i + 1);
-          try {
-            const parsed = JSON.parse(candidate);
-            if (parsed && parsed.term && parsed.meaning) {
-              results.push(parsed);
-            }
-          } catch (_) {
-            // Wait for valid JSON structure
-          }
-          objStart = -1;
-        }
-      }
-    }
-  }
-  return results;
-}
-
-// Streams full-quality gemini-3.8-flash cards progressively so Card 1 appears in ~2-3s
-async function streamGeminiBriefing(apiKey, prompt, onProgress, timeoutMs = 60000) {
-  const attemptStream = async (useThinkingCap) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    const generationConfig = {
-      responseMimeType: 'application/json',
-      temperature: 0.85,
-      ...(useThinkingCap ? { thinkingConfig: { thinkingBudget: 128 } } : {})
-    };
-
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key=${apiKey.trim()}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig
-        })
-      });
-
-      if (!response.ok) {
-        clearTimeout(timer);
-        const errData = await response.json().catch(() => ({}));
-        const err = new Error(`Gemini API (${response.status}): ${errData?.error?.message || response.statusText}`);
-        err.status = response.status;
-        throw err;
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let sseBuffer = '';
-      let accumulatedText = '';
-      let emittedCount = 0;
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        sseBuffer += decoder.decode(value, { stream: true });
-        const lines = sseBuffer.split('\n');
-        sseBuffer = lines.pop() || '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-          const payload = trimmed.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-
-          try {
-            const chunk = JSON.parse(payload);
-            const parts = chunk?.candidates?.[0]?.content?.parts || [];
-            for (const part of parts) {
-              if (part.text && !part.thought) {
-                accumulatedText += part.text;
-              }
-            }
-          } catch (_) {
-            // Skip incomplete SSE line
-          }
-        }
-
-        const objects = extractCompleteObjects(accumulatedText);
-        if (objects.length > emittedCount) {
-          emittedCount = objects.length;
-          onProgress(objects);
-        }
-      }
-
-      clearTimeout(timer);
-      const finalObjects = extractCompleteObjects(accumulatedText);
-      if (finalObjects.length === 0) {
-        throw new Error('Gemini returned an empty response. Please try again.');
-      }
-      return finalObjects;
-    } catch (err) {
-      clearTimeout(timer);
-      if (err.name === 'AbortError') {
-        throw new Error('Network timed out after 60s. Check your connection and try again.');
-      }
-      throw err;
-    }
-  };
-
+const getLocalDateKey = (dateInput = new Date(), timeZone = getDeviceTimeZone()) => {
+  const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
   try {
-    return await attemptStream(true);
-  } catch (err) {
-    if (err.status === 400) {
-      return await attemptStream(false);
-    }
-    throw err;
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(d);
+  } catch (_) {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   }
-}
+};
 
 export default function App() {
   const [dailyData, setDailyData] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
-  const [isBgSyncing, setIsBgSyncing] = useState(false);
-  const [streamCount, setStreamCount] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [error, setError] = useState(null);
+  const [activeTimeZone, setActiveTimeZone] = useState(getDeviceTimeZone);
   const generationLockRef = useRef(false);
+  const initialAutoCheckDoneRef = useRef(false);
 
   const [touchStart, setTouchStart] = useState(null);
   const [touchEnd, setTouchEnd] = useState(null);
   const minSwipeDistance = 50;
 
   useEffect(() => {
-    loadHistory();
+    const tz = getDeviceTimeZone();
+    setActiveTimeZone(tz);
+
+    // Sync current device time zone to Firestore so midnight cron uses your active location
+    if (firebaseConfig.projectId) {
+      setDoc(
+        doc(db, 'appSettings', 'userConfig'),
+        { timeZone: tz, updatedAt: new Date().toISOString() },
+        { merge: true }
+      ).catch(() => {});
+    }
+
+    initLoad(tz);
   }, []);
 
   useEffect(() => {
@@ -275,22 +159,10 @@ export default function App() {
     return () => clearInterval(timer);
   }, [isLoading]);
 
-  const saveItemsInBackground = (items) => {
-    if (!firebaseConfig.projectId || !items?.length) return;
-    Promise.allSettled(items.map(item => addDoc(collection(db, 'vocabHistory'), item)))
-      .then((results) => {
-        const rejected = results.find(r => r.status === 'rejected');
-        if (rejected) {
-          console.error('Firestore write error:', rejected.reason);
-          setError('Displayed locally, but Firestore blocked saving. Check Firebase Rules.');
-        }
-      });
-  };
-
-  const loadHistory = async () => {
+  const loadHistory = async (tz = activeTimeZone) => {
     if (!firebaseConfig.projectId) {
       setDailyData(STARTER_DECK);
-      return;
+      return { items: STARTER_DECK, dbOk: false };
     }
     try {
       const q = query(collection(db, 'vocabHistory'), orderBy('timestamp', 'desc'), limit(260));
@@ -298,9 +170,9 @@ export default function App() {
 
       const seen = new Set();
       const cleanedHistory = [];
-      querySnapshot.forEach((doc) => {
-        const data = doc.data();
-        const dateKey = data.timestamp ? getLocalDateKey(data.timestamp) : 'starter';
+      querySnapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        const dateKey = data.timestamp ? getLocalDateKey(data.timestamp, tz) : 'starter';
         const dedupeKey = `${dateKey}_${(data.term || '').toLowerCase().trim()}`;
         if (!seen.has(dedupeKey)) {
           seen.add(dedupeKey);
@@ -308,106 +180,104 @@ export default function App() {
         }
       });
 
-      if (cleanedHistory.length > 0) {
-        setDailyData(cleanedHistory.slice(0, 240));
-      } else {
-        setDailyData(STARTER_DECK);
-      }
+      const finalItems = cleanedHistory.length > 0 ? cleanedHistory.slice(0, 240) : STARTER_DECK;
+      setDailyData(finalItems);
+      return { items: finalItems, dbOk: true };
     } catch (err) {
       console.error('History load fallback:', err);
       setDailyData(STARTER_DECK);
+      return { items: STARTER_DECK, dbOk: false };
     }
   };
 
-  const todayKey = getLocalDateKey();
+  const initLoad = async (tz) => {
+    const { items, dbOk } = await loadHistory(tz);
+    if (initialAutoCheckDoneRef.current || !dbOk) return;
+    initialAutoCheckDoneRef.current = true;
+
+    // If past 12:00 AM in current time zone and today's 8 cards aren't generated yet, auto-generate now
+    const todayKey = getLocalDateKey(new Date(), tz);
+    const todaysCount = items.filter(
+      item => !item.isStarter && item.timestamp && getLocalDateKey(item.timestamp, tz) === todayKey
+    ).length;
+
+    if (todaysCount < 8) {
+      await generateNewBriefing(items, tz);
+    }
+  };
+
+  const todayKey = getLocalDateKey(new Date(), activeTimeZone);
   const todaysSavedCards = dailyData.filter(
-    item => !item.isStarter && item.timestamp && getLocalDateKey(item.timestamp) === todayKey
+    item => !item.isStarter && item.timestamp && getLocalDateKey(item.timestamp, activeTimeZone) === todayKey
   );
   const hasTodaysBriefing = todaysSavedCards.length >= 8;
 
-  const generateNewBriefing = async () => {
-    if (generationLockRef.current || isLoading || isBgSyncing || hasTodaysBriefing) {
-      return;
-    }
+  const generateNewBriefing = async (existingItemsOverride = null, tzOverride = null) => {
+    const tz = tzOverride || activeTimeZone;
+    const baseItems = Array.isArray(existingItemsOverride) ? existingItemsOverride : dailyData;
+    const currentTodayCount = baseItems.filter(
+      item => !item.isStarter && item.timestamp && getLocalDateKey(item.timestamp, tz) === getLocalDateKey(new Date(), tz)
+    ).length;
+
+    if (generationLockRef.current || currentTodayCount >= 8) return;
     generationLockRef.current = true;
     setIsLoading(true);
     setError(null);
-    setStreamCount(0);
-
-    let streamedItems = [];
 
     try {
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-      if (!apiKey) throw new Error('Gemini API Key is missing in Vercel.');
-
-      const existingRealItems = dailyData.filter(item => !item.isStarter);
-      const existingTerms = existingRealItems.slice(0, 120).map(item => item.term).join(', ');
-      const bannedCliches = 'ubiquitous, perspicacious, sycophant, mellifluous, inexorable, paradigm, synergy, plethora, quintessential, dichotomy';
-      const exclusionRule = `Never use basic GRE clichés (${bannedCliches}) or any previously generated terms: ${existingTerms}.`;
-      const batchTimestamp = new Date().toISOString();
-
-      const prompt = `You are a vocabulary curator for a Dallas-based senior advisor / Big 4 consultant who travels across the US and Canada and socializes with local friends.
-Generate a JSON array of exactly 8 items in this exact order:
-- Items 1 to 5 (type: "word"): Medium-to-difficult executive English words with the rhetorical weight, precision, and cadence of Barack Obama, Shashi Tharoor, or a senior partner—never basic business English.
-- Item 6 (type: "slang"): An everyday high-context American corporate/social idiom used in US client meetings and casual drinks.
-- Item 7 (type: "slang"): An authentic Texas / DFW regional expression (label region on the term, e.g., "Term (Texas)").
-- Item 8 (type: "slang"): An authentic Canadian expression used in Toronto or Calgary (label region on the term, e.g., "Term (Canadian)").
-
-Requirements:
-- Meaning: Nuanced, clear definition including subtle connotation or register.
-- Examples: Realistic, natural, multi-clause dialogue showing how an articulate leader or local friend actually uses the term in conversation.
-- ${exclusionRule}
-
-Return ONLY a valid JSON array matching this exact schema:
-[{"type":"word","term":"string","pronunciation":"string","meaning":"string","personalExample":"string","professionalExample":"string"}]`;
-
-      const deduplicateItems = (rawItems) => {
-        const seen = new Set(existingRealItems.map(i => i.term.toLowerCase().trim()));
-        const unique = [];
-        for (const item of rawItems) {
-          const key = (item.term || '').toLowerCase().trim();
-          if (key && !seen.has(key)) {
-            seen.add(key);
-            unique.push({ ...item, timestamp: batchTimestamp });
-          }
-          if (unique.length === 8) break;
-        }
-        return unique;
-      };
-
-      const finalRaw = await streamGeminiBriefing(
-        apiKey,
-        prompt,
-        (partialObjects) => {
-          const stamped = deduplicateItems(partialObjects);
-          if (stamped.length > 0) {
-            streamedItems = stamped;
-            setStreamCount(stamped.length);
-            setDailyData([...stamped, ...existingRealItems].slice(0, 240));
-            if (stamped.length === 1) {
-              setCurrentIndex(0);
-              setIsLoading(false);
-              setIsBgSyncing(true);
-            }
-          }
-        },
-        60000
-      );
-
-      const finalStamped = deduplicateItems(finalRaw);
-      if (finalStamped.length > 0) {
-        setDailyData([...finalStamped, ...existingRealItems].slice(0, 240));
-        saveItemsInBackground(finalStamped);
+      const res = await fetch(`/api/daily-briefing?tz=${encodeURIComponent(tz)}`);
+      if (res.ok) {
+        await loadHistory(tz);
+        setCurrentIndex(0);
+        return;
       }
+
+      // Local `npm run dev` fallback
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      if (!apiKey) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `Server error (${res.status})`);
+      }
+
+      const existingRealItems = baseItems.filter(item => !item.isStarter);
+      const existingTerms = existingRealItems.slice(0, 120).map(item => item.term).join(', ');
+      const prompt = `Generate a JSON array of 8 items: 5 executive English words (Barack Obama / Shashi Tharoor / Big 4 partner caliber) and 3 North American slangs (1 US corporate/social, 1 Texas labeled "(Texas)", 1 Canadian labeled "(Canadian)"). Do NOT repeat: ${existingTerms}.
+Schema: [{"type":"word","term":"string","pronunciation":"string","meaning":"string","personalExample":"string","professionalExample":"string"}]`;
+
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey.trim()}`;
+      const gRes = await fetch(geminiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            temperature: 0.85,
+            thinkingConfig: { thinkingLevel: 'minimal' }
+          }
+        })
+      });
+
+      if (!gRes.ok) {
+        const errData = await gRes.json().catch(() => ({}));
+        throw new Error(`Gemini API (${gRes.status}): ${errData?.error?.message || gRes.statusText}`);
+      }
+
+      const gData = await gRes.json();
+      const rawText = gData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const match = rawText.match(/\[\s*\{.*\}\s*\]/s);
+      const parsed = JSON.parse(match ? match[0] : rawText);
+      const timestamp = new Date().toISOString();
+      const stamped = parsed.slice(0, 8).map(item => ({ ...item, timestamp }));
+
+      setDailyData([...stamped, ...existingRealItems].slice(0, 240));
+      setCurrentIndex(0);
+      Promise.allSettled(stamped.map(item => addDoc(collection(db, 'vocabHistory'), item)));
     } catch (err) {
       console.error(err);
-      if (streamedItems.length > 0) {
-        saveItemsInBackground(streamedItems);
-      }
-      setError(err.message || 'Failed to generate new vocabulary.');
+      setError(err.message || 'Failed to generate new briefing.');
     } finally {
       setIsLoading(false);
-      setIsBgSyncing(false);
       generationLockRef.current = false;
     }
   };
@@ -438,7 +308,12 @@ Return ONLY a valid JSON array matching this exact schema:
 
   const formatDate = (isoString) => {
     if (!isoString) return 'Sample Deck';
-    return new Date(isoString).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    return new Date(isoString).toLocaleDateString('en-US', {
+      timeZone: activeTimeZone,
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric'
+    });
   };
 
   const currentItem = dailyData[currentIndex] || STARTER_DECK[0];
@@ -454,25 +329,25 @@ Return ONLY a valid JSON array matching this exact schema:
     if (targetIndex !== -1) setCurrentIndex(targetIndex);
   };
 
+  const shortTzName = activeTimeZone.split('/').pop()?.replace(/_/g, ' ') || activeTimeZone;
+
   return (
     <div className="min-h-screen flex flex-col justify-between p-4 md:py-5 md:px-6 max-w-md mx-auto">
       <div>
-        {/* Header */}
         <header className="mb-3 flex justify-between items-center gap-2">
           <div>
             <h1 className="text-2xl md:text-3xl font-bold text-amber-500 leading-tight">Daily Briefing</h1>
             <p className="text-gray-400 text-[11px] tracking-widest uppercase mt-0.5">
-              30-Day Archive ({dailyData.length} items)
-              {isBgSyncing && <span className="text-amber-400 ml-2">• Streaming {streamCount}/8...</span>}
+              12 AM {shortTzName} • {dailyData.length} Items
             </p>
           </div>
           <button
-            onClick={generateNewBriefing}
-            disabled={isLoading || isBgSyncing || hasTodaysBriefing}
+            onClick={() => generateNewBriefing()}
+            disabled={isLoading || hasTodaysBriefing}
             title={
               hasTodaysBriefing
-                ? "Today's briefing is complete. Come back tomorrow for a fresh set."
-                : 'Generate today’s 8-card briefing'
+                ? `Today's briefing is ready. Next briefing triggers at 12:00 AM (${activeTimeZone}).`
+                : 'Generate today’s 8-card briefing now'
             }
             className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition ${
               hasTodaysBriefing
@@ -480,15 +355,15 @@ Return ONLY a valid JSON array matching this exact schema:
                 : 'bg-gray-800 text-amber-500 border-gray-700 hover:bg-gray-700 disabled:opacity-50'
             }`}
           >
-            {isLoading || isBgSyncing ? (
+            {isLoading ? (
               <>
                 <Loader2 size={16} className="animate-spin" />
-                <span>{isBgSyncing ? `${streamCount}/8...` : 'Starting...'}</span>
+                <span>Curating...</span>
               </>
             ) : hasTodaysBriefing ? (
               <>
                 <CheckCircle2 size={16} />
-                <span>Done for Today</span>
+                <span>Ready Today</span>
               </>
             ) : (
               <>
@@ -499,7 +374,6 @@ Return ONLY a valid JSON array matching this exact schema:
           </button>
         </header>
 
-        {/* Always-Visible Day / Date Archive Selector */}
         <div className="mb-3 bg-gray-900/90 border border-gray-800 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 flex-1 min-w-0">
             <Calendar size={14} className="text-amber-500 shrink-0" />
@@ -551,11 +425,10 @@ Return ONLY a valid JSON array matching this exact schema:
       {isLoading ? (
         <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 border border-gray-800 rounded-2xl min-h-[380px]">
           <Loader2 size={44} className="text-amber-500 animate-spin mb-4" />
-          <p className="text-gray-400 animate-pulse text-sm">Streaming first executive word ({elapsedSeconds}s)...</p>
+          <p className="text-gray-400 animate-pulse text-sm">Curating today's executive briefing ({elapsedSeconds}s)...</p>
         </div>
       ) : (
         <>
-          {/* Progress Dots for Current Day */}
           <div className="flex justify-center gap-1.5 mb-3">
             {[...Array(Math.min(8, currentDayItems.length))].map((_, idx) => (
               <div
@@ -567,7 +440,6 @@ Return ONLY a valid JSON array matching this exact schema:
             ))}
           </div>
 
-          {/* Flashcard */}
           <div
             onTouchStart={onTouchStart}
             onTouchMove={onTouchMove}
@@ -625,7 +497,6 @@ Return ONLY a valid JSON array matching this exact schema:
             </div>
           </div>
 
-          {/* Bottom Card Navigation: Previous (Left) & Next (Right) */}
           <div className="flex justify-between items-center mt-4 pt-1">
             <button
               onClick={() => setCurrentIndex(c => Math.max(0, c - 1))}
